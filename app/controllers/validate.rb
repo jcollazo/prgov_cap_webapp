@@ -48,18 +48,37 @@ PRgovCAPWebApp::App.controllers :validate do
     # render 'index', :layout => :prgov
     cert_id = ""
 
+    ##################################
+    # Incoming payload from QR code: #
+    ##################################
     # certid is how the value arrives from the QR code scan.
     if(params["certid"].to_s =~ /^[0-9a-zA-Z]*$/ and
-      (params["certid"].to_s.length > 6 and params["certid"].to_s.length < 36))
+      (params["certid"].to_s.length > 6 and params["certid"].to_s.length <= 36))
+      cert_id = params["certid"]
+    end
+    # add a case for our secondary type of UUID type-4 added by LoS for
+    # request manually created by supervisors at PRPD. This was added later,
+    # and was not according to spec. But we need to be able to validate
+    # everything, so it was added.
+    if(params["certid"] =~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$/)
       cert_id = params["certid"]
     end
 
+    #################################
+    # Incoming payload from app     #
+    #################################
     # cert_id is how we use it on the rest of the app
     if(params["cert_id"].to_s =~ /^[0-9a-zA-Z]*$/ and
-      (params["cert_id"].to_s.length > 6 and params["cert_id"].to_s.length < 36))
+      (params["cert_id"].to_s.length > 6 and params["cert_id"].to_s.length <= 36))
       cert_id = params["cert_id"]
     end
-
+    # add a case for our secondary type of UUID type-4 added by LoS for
+    # request manually created by supervisors at PRPD. This was added later,
+    # and was not according to spec. But we need to be able to validate
+    # everything, so it was added.
+    if(params["cert_id"] =~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$/)
+      cert_id = params["cert_id"]
+    end
 
     render 'cap', :layout => :prgov, :locals => { :cert_id => cert_id }
   end
@@ -81,8 +100,8 @@ PRgovCAPWebApp::App.controllers :validate do
     # reset the percentage
     session["percent"] = nil
     # clean up any spaces
-    params["cert_id"]   = params["cert_id"].strip
-    params["person_id"] = params["person_id"].strip
+    params["cert_id"]   = params["cert_id"].to_s.strip
+    params["person_id"] = params["person_id"].to_s.strip
 
     # default value for flags to detect if we found a passport
     # or ssn.
@@ -91,16 +110,81 @@ PRgovCAPWebApp::App.controllers :validate do
 
     # Add errors if required values are empty
     error = ""
-    error << "&cid=false" if(params["cert_id"].to_s.length == 0)
-    error << "&person_id=false" if(params["person_id"].to_s.length == 0)
+    error << "&cid=false" if(params["cert_id"].length == 0)
+    error << "&person_id=false" if(params["person_id"].length == 0)
     error << "&captcha=false" if(!recaptcha_valid?)
 
-    # Now lets validate the cert_id structure. Improve this later
-    # so that we also find empty cid here.
-    if(!(params["cert_id"] =~ /^[0-9a-zA-Z]*$/ and
-      (params["cert_id"].length > 6 and params["cert_id"].length < 36)))
+    # Now lets validate the cert_id structure.
+    # We can expect:
+    # PR.gov: PRCAP<numbers>
+    # RCI ventanilla: <numbers>  (starts with numeric id 1)
+    # RCI PRPD supervisor: <UUID> (type-4 UUID)
+    #
+    # So, in order to allow for the new type of UUID, we are including
+    # a secondary validation for the UUID type-4.
+    # catch:
+    # if it exceeds our expected length
+    # if it doesn't conform to our expected standards
+    if(params["cert_id"].length < 7 or params["cert_id"].length > 36)
+        # puts "invalid length"
         error << "&cid=false"
     end
+
+
+    # flag to determine if a cap id has error has ocurred, in which
+    # the current cert_id has been found to not be a proper id.
+    cert_id_error = false
+
+    # If this cert id matches a proper CAP tx_id
+    # that consists of: PRCAP<numbers> (prgov) or 1<numbers> (rci)
+    # then we should enforce upper casing, since RCI API is not currently
+    # able to perform case insensitive searches, which makes it difficult
+    # for our users. Here we make sure we treat these matching IDs as
+    # uppercase
+    if ((params["cert_id"] =~ /^[0-9a-zA-Z]*$/).nil?)
+      cert_id_error = true
+    else
+      # capitalize these matching IDs as they're expected in uppercase.
+      params["cert_id"] = params["cert_id"].upcase
+
+      # just in case, check if its a PRCAP tx_id, and detect
+      # any errors in length
+      if(params["cert_id"].include? "PRCAP" and params["cert_id"].length != 24)
+        cert_id_error = true
+      else
+        # otherwise, this is either a PRCAP or RCI transaction that is properly
+        # entered, mark the flag properly as there are no errors.
+        cert_id_error = false
+      end
+    end
+
+
+    # If this cert id matches a proper CAP tx_id
+    # that consists of: UUID type-4
+    # then we should enforce LOWER case, since RCI API is not currently
+    # able to perform case insensitive searches, which makes it difficult
+    # for our users. Here we make sure we treat these matching IDs as
+    # lowercase, per the UUID type-4 standard.
+    if ((params["cert_id"] =~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$/).nil?)
+      # improper format, did not match the regexp
+      # so mark this as an error, only if a previous cert_id has not been
+      # found.
+      cert_id_error = true if cert_id_error
+    else
+      # proper format, search matched the regexp
+      cert_id_error = false
+      params["cert_id"] = params["cert_id"].downcase
+    end
+
+    # Now add the proper error if cert_id_error is still true
+    error << "&cid=false" if(cert_id_error)
+
+    # make sure people aren't entering any combination of 0s as their license/
+    # person id (ie, 000, 000000, etc.) - which has been a common attempt.
+    if(params["person_id"].gsub("0", "").length == 0)
+        error << "&person_id=false"
+    end
+
 
     # now check the person_id to see if it's a valid ssn or passport
     # if numeric only and SSN(4) and max passport length (9)
@@ -123,11 +207,14 @@ PRgovCAPWebApp::App.controllers :validate do
     else
        # Set up the payload. Append
        # the data that we'll send to GMQ.
+
+       # here we make sure to make the tx_id capitalized (upcase),
+       # as all our CAP tx_ids require a capitalized tx_id, ie: PRCAP not prcap.
+       # So let's fix it for the user for this specific transaction.
        payload = {
                     "tx_id" => params["cert_id"],
                     "IP" => request.ip
                  }
-      # if
       if(ssn)
         payload["ssn"] = params["person_id"]
       end
@@ -189,11 +276,11 @@ PRgovCAPWebApp::App.controllers :validate do
                     puts "Looping through #{id}"
                     if(id.has_key? "ssn" or id.has_key? "passport")
                        puts "NOW COMPARING SSN AND PASSPORT vs RESULT"
-                       puts "#{id["ssn"][0..3].to_s} == #{result["ssn"][0..3].to_s}"
+                       puts "#{id["ssn"].to_s[-4..-1]} == #{result["ssn"].to_s[-4..-1]}"
                         # if the requested ssn and the result ssn match, then we
                         # have a proper match
                         if(result["ssn"].to_s.length > 0)
-                          if(id["ssn"][0..3].to_s == result["ssn"][0..3].to_s)
+                          if(id["ssn"].to_s[-4..-1] == result["ssn"].to_s[-4..-1])
                                # stop refreshing
                                refresh = false
                                # mark us as done
